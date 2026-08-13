@@ -49,7 +49,7 @@
 1. **零距离首帧启动**  
    该问题出现在本项目此前的测试版本中，并非原项目的固有问题。同一 CarPlay 连接内停止并重新开启导航时，首个有效 primary maneuver 的 `dist_maneuver_m` 可能暂时为 `0`；此前的启动条件会因此阻止 renderer 建立。当前代码允许在本次导航首幅 renderer 画面尚未成功显示时，将完整有效且距离为 `0` 的 primary maneuver 作为当前位置的立即动作处理，并按真实类型显示。该逻辑尚未完成实车验证。
 
-2. **多次重复 CarPlay 导航与原车导航接管**  
+2. **多次重复 CarPlay 导航与原车导航接管**  （失败）
    当前已经能够实现一次正常接管，但此前路试发现：原车导航第一次接管并关闭后，再次开启 CarPlay 导航，随后再次停止 CarPlay 导航或断开 CarPlay，原车导航仍可能无法第二次接管路径引导窗口。当前代码已进一步调整退出清理和 gate 释放顺序，但尚未完成重复循环实车验证。
 
 ### 下载与部署
@@ -217,7 +217,7 @@ This project is derived from [luka-dev/mib2q-carplay-rgi](https://github.com/luk
 1. **Zero-distance first-frame startup**  
    This issue was introduced in an earlier test build of this project rather than upstream. While the first renderer frame is still pending, a complete valid primary maneuver with distance `0` may now be rendered immediately using its real type. Vehicle verification is still pending.
 
-2. **Repeated CarPlay guidance and stock-navigation handoff**  
+2. **Repeated CarPlay guidance and stock-navigation handoff**  （Failure）
    One handoff can currently succeed. Cleanup and gate-release ordering have been adjusted again to support the second and later cycles, but repeated vehicle testing is still pending.
 
 ### Download and deployment
