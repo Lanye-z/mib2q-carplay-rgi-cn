@@ -92,9 +92,13 @@ if [ "${ENABLE_VNC_WHEEL_ZOOM_BUILD_PATCH:-1}" = "1" ]; then
     fi
 
     rm -f "$WHEEL_BACKUP"
-    sed -i.wheelbak '/public void onMagnificationChanged(int i) {/a\
-        try { com.luka.carplay.routeguidance.VncWheelZoomBridge.onMagnificationChanged(i); } catch (Throwable t) { }\
-' "$CLUSTER_FILE"
+    cp "$CLUSTER_FILE" "$WHEEL_BACKUP"
+    awk '
+        { print }
+        index($0, "public void onMagnificationChanged(int i) {") {
+            print "        try { com.luka.carplay.routeguidance.VncWheelZoomBridge.onMagnificationChanged(i); } catch (Throwable t) { }"
+        }
+    ' "$WHEEL_BACKUP" > "$CLUSTER_FILE"
 
     if ! grep -q 'VncWheelZoomBridge.onMagnificationChanged(i)' "$CLUSTER_FILE"; then
         echo "ERROR: VNC wheel-zoom hook injection failed" >&2
