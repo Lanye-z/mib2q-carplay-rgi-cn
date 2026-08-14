@@ -51,9 +51,56 @@ BUILD_ID="$(date +%Y-%m-%d)-$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev
 echo "Build ID: $BUILD_ID"
 
 HOOK_FILE="$SRC_DIR/com/luka/carplay/CarPlayHook.java"
+CLUSTER_FILE="$SRC_DIR/de/audi/tghu/navi/app/cluster/ClusterService.java"
+HOOK_BACKUP="$HOOK_FILE.bak"
+WHEEL_BACKUP="$CLUSTER_FILE.wheelbak"
+
+cleanup_sources() {
+    if [ -f "$HOOK_BACKUP" ]; then
+        mv "$HOOK_BACKUP" "$HOOK_FILE"
+    fi
+    if [ -f "$WHEEL_BACKUP" ]; then
+        mv "$WHEEL_BACKUP" "$CLUSTER_FILE"
+    fi
+}
+trap cleanup_sources EXIT
+
 if [ -f "$HOOK_FILE" ]; then
+    rm -f "$HOOK_BACKUP"
     sed -i.bak "s/@BUILD_ID@/$BUILD_ID/g" "$HOOK_FILE"
-    trap 'mv "$HOOK_FILE.bak" "$HOOK_FILE"' EXIT
+fi
+
+# ---------------------------------------------------------------------------
+# EXPERIMENTAL VNC WHEEL-ZOOM BUILD-TIME HOOK
+# ---------------------------------------------------------------------------
+# Keep the large patched ClusterService.java source unchanged in Git. During
+# this experimental branch build only, inject one non-fatal call at the start
+# of ClusterService.onMagnificationChanged(int), compile it into the JAR, and
+# restore the source automatically on exit.
+#
+# The bridge itself is inert unless /tmp/mhi2q-vnc-wheel-enable exists, so an
+# installed experimental JAR behaves like the normal JAR outside the explicit
+# Toolbox wheel-zoom test.
+if [ "${ENABLE_VNC_WHEEL_ZOOM_BUILD_PATCH:-1}" = "1" ]; then
+    if [ ! -f "$CLUSTER_FILE" ]; then
+        echo "ERROR: ClusterService.java not found: $CLUSTER_FILE" >&2
+        exit 1
+    fi
+    if ! grep -q 'public void onMagnificationChanged(int i)' "$CLUSTER_FILE"; then
+        echo "ERROR: onMagnificationChanged(int i) hook point not found" >&2
+        exit 1
+    fi
+
+    rm -f "$WHEEL_BACKUP"
+    sed -i.wheelbak '/public void onMagnificationChanged(int i) {/a\
+        try { com.luka.carplay.routeguidance.VncWheelZoomBridge.onMagnificationChanged(i); } catch (Throwable t) { }\
+' "$CLUSTER_FILE"
+
+    if ! grep -q 'VncWheelZoomBridge.onMagnificationChanged(i)' "$CLUSTER_FILE"; then
+        echo "ERROR: VNC wheel-zoom hook injection failed" >&2
+        exit 1
+    fi
+    echo "Experimental VNC wheel-zoom magnification hook: enabled"
 fi
 
 SOURCES_LIST=$(mktemp)
