@@ -51,11 +51,18 @@ final class AmapProgressTracker {
 
         boolean same = samePhysical(i, v, gen, head);
         if (!same) {
+            /* Real Amap logs show a common rollover ordering where the new
+             * physical head/detail arrives first, while dist_maneuver_m still
+             * carries the previous head's shorter distance for one snapshot
+             * (e.g. new nodeDistance=100 with transient distance=75, followed
+             * by the corrected 100).  v38 treats that first pair as
+             * provisional instead of freezing the stale 75 forever. */
+            boolean inferredInitialPair = nodeDistance > 0
+                && distance > 0 && distance < nodeDistance;
             return commit(distance, denominator > 0 ? denominator : nodeDistance,
-                i, v, gen, head, allowCorrection);
+                i, v, gen, head, allowCorrection || inferredInitialPair);
         }
 
-        if (!allowCorrection) provisional = false;
         if (distanceM <= 0) {
             distanceM = distance;
             if (denominatorM <= 0)
@@ -63,7 +70,10 @@ final class AmapProgressTracker {
             return result(false, false);
         }
 
-        if (provisional && allowCorrection && nodeDistance > 0
+        /* Keep an inferred/explicit provisional pair alive until the next
+         * usable sample resolves it.  Do not clear it merely because callers
+         * use allowCorrection=false for ordinary monotonic updates. */
+        if (provisional && nodeDistance > 0
                 && distance > distanceM && distance <= nodeDistance) {
             distanceM = distance;
             if (denominator > 0) denominatorM = denominator;
@@ -74,6 +84,7 @@ final class AmapProgressTracker {
         if (distance < distanceM) {
             distanceM = distance;
             if (denominator > 0) denominatorM = denominator;
+            provisional = false;
             return result(false, false);
         }
         if (distance == distanceM) {
@@ -84,6 +95,11 @@ final class AmapProgressTracker {
             if (denominator > 0) denominatorM = denominator;
             return result(false, false);
         }
+
+        /* A larger value that cannot be explained as the initial head/detail
+         * pairing correction remains suppressed.  Resolve provisional state
+         * here so a later arbitrary increase cannot be accepted. */
+        provisional = false;
         return result(false, true);
     }
 
