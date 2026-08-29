@@ -254,8 +254,11 @@ public class AmapRouteGuidance extends RouteGuidance {
             detector.rejectProbe();
             v38.disable();
             Log.i(TAG, "PROBING -> LEGACY: no confirmation within 5 s");
+            /* Keep timeout decision + forwarded inactive state atomic with
+             * synchronized onFrame(). A recovery frame cannot race between
+             * deciding to expire and delivering the corresponding clear. */
+            forwardProbeInactiveState();
         }
-        forwardProbeInactiveState();
     }
 
     private void syncSoftInactiveTimer() {
@@ -288,18 +291,20 @@ public class AmapRouteGuidance extends RouteGuidance {
                 continue;
             }
 
-            byte[] expiry;
             synchronized (this) {
                 if (!softTimerRunning || gen != softGeneration
                         || !v38.isSoftInactiveHolding()) return;
                 long current = v38.softInactiveDeadlineMs();
                 if (current > System.currentTimeMillis()) continue;
                 v38.noteSoftInactiveExpired();
-                expiry = v38.buildSoftInactiveExpiryFrame();
+                byte[] expiry = v38.buildSoftInactiveExpiryFrame();
                 softTimerRunning = false;
-            }
-            if (expiry != null && expiry.length > 0) {
-                AmapRouteGuidance.super.onFrame(CarplayBus.EVT_RGD_UPDATE, 0, expiry, expiry.length);
+                /* Same atomicity rule as probe expiry: either a recovery
+                 * onFrame wins the monitor first, or this timeout clear does. */
+                if (expiry != null && expiry.length > 0) {
+                    AmapRouteGuidance.super.onFrame(
+                        CarplayBus.EVT_RGD_UPDATE, 0, expiry, expiry.length);
+                }
             }
             return;
         }
