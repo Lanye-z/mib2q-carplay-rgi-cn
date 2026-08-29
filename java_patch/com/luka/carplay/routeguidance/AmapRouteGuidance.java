@@ -17,10 +17,12 @@ import com.luka.carplay.framework.Log;
  *   - route_state=0 or source_supports_rg=0 remains a hard clear;
  *   - route=1,count=0,visible=0 becomes a 5 s soft-inactive window;
  *   - fresh maneuver/distance/ETA/lane evidence extends/cancels that window;
- *   - visible_in_app=0 is not written back as 1 and therefore cannot create
- *     the dirty-state feedback loop seen in the earlier iOS27 workaround;
+ *   - raw visible_in_app is preserved here, but a non-authoritative Amap zero
+ *     is presented to RouteGuidance as -1 (unknown), never rewritten to 1;
  *   - transient count/list clears are held during the grace window to avoid a
- *     NO_SYMBOL flash before Amap publishes the real maneuver data.
+ *     NO_SYMBOL flash before Amap publishes the real maneuver data;
+ *   - after a genuine soft-inactive expiry, repeated zero-only frames cannot
+ *     continuously re-activate the renderer.
  */
 public class AmapRouteGuidance extends RouteGuidance {
     private static final String TAG = "AmapRouteGuidance";
@@ -36,6 +38,7 @@ public class AmapRouteGuidance extends RouteGuidance {
     private int softInactiveGeneration = 0;
     private boolean softInactiveTimerRunning = false;
     private boolean softInactiveLatched = false;
+    private boolean compatActive = false;
 
     public synchronized void start() {
         resetCompatState();
@@ -72,11 +75,17 @@ public class AmapRouteGuidance extends RouteGuidance {
             rawRouteState, rawManeuverCount, rawVisibleInApp);
         boolean positiveActivationDelta = hasPositiveActivationDelta(d);
 
-        if (hardClear || positiveActivationDelta) {
+        if (hardClear) {
+            compatActive = false;
+            softInactiveLatched = false;
+        } else if (positiveActivationDelta
+                || (rawVisibleInApp < 0 && rawRouteState >= 1)) {
+            compatActive = true;
             softInactiveLatched = false;
         }
 
-        if (softInactive) {
+        /* Match v38: only an already-active route gets the soft-inactive grace. */
+        if (softInactive && compatActive) {
             softInactiveLatched = true;
             if (softInactiveStartedMs == 0L) {
                 softInactiveStartedMs = now;
@@ -102,11 +111,12 @@ public class AmapRouteGuidance extends RouteGuidance {
 
         /*
          * v38 behaviour: visible=0 is not an immediate teardown when other
-         * route evidence says the session is alive.  During the ambiguous
-         * route=1/count=0 window also preserve count/list state until the grace
-         * expires, instead of clearing an otherwise valid maneuver snapshot.
+         * route evidence says the session is alive.  Keep the raw zero in this
+         * adapter, but present it to the existing RouteGuidance as -1/unknown
+         * so route/maneuver evidence decides activity.  This also clears a
+         * stale visible=0 left in the base class from the previous route.
          */
-        boolean suppressVisibleZero = rawVisibleInApp == 0
+        boolean normalizeVisibleZero = rawVisibleInApp == 0 && compatActive
             && (graceActive || rawRouteState > 0 || rawManeuverCount > 0 || freshEvidence);
         boolean suppressTransientCountClear = graceActive && softInactive
             && d.has("maneuver_count") && rawManeuverCount == 0;
@@ -118,8 +128,8 @@ public class AmapRouteGuidance extends RouteGuidance {
 
         byte[] forwarded = payload;
         int forwardedLen = len;
-        if (suppressVisibleZero || suppressTransientCountClear || suppressTransientListClear) {
-            forwarded = filterPayload(payload, len, suppressVisibleZero,
+        if (normalizeVisibleZero || suppressTransientCountClear || suppressTransientListClear) {
+            forwarded = normalizePayload(payload, len, normalizeVisibleZero,
                 suppressTransientCountClear, suppressTransientListClear);
             forwardedLen = forwarded.length;
         }
@@ -185,12 +195,13 @@ public class AmapRouteGuidance extends RouteGuidance {
         return false;
     }
 
-    private byte[] filterPayload(byte[] payload, int len, boolean removeVisibleZero,
-                                 boolean removeCountClear, boolean removeListClear) {
+    private byte[] normalizePayload(byte[] payload, int len, boolean normalizeVisibleZero,
+                                    boolean removeCountClear, boolean removeListClear) {
         try {
             String text = new String(payload, 0, len, "UTF-8");
-            StringBuffer out = new StringBuffer(text.length());
+            StringBuffer out = new StringBuffer(text.length() + 32);
             int pos = 0;
+            boolean sawVisible = false;
 
             while (pos < text.length()) {
                 int eol = text.indexOf('\n', pos);
@@ -199,13 +210,16 @@ public class AmapRouteGuidance extends RouteGuidance {
 
                 String line = text.substring(pos, eol);
                 String normalized = line;
-                if (normalized.endsWith("\r")) {
+                boolean hadCR = normalized.endsWith("\r");
+                if (hadCR) {
                     normalized = normalized.substring(0, normalized.length() - 1);
                 }
 
                 boolean drop = false;
-                if (removeVisibleZero && normalized.startsWith("visible_in_app:")) {
-                    drop = true;
+                boolean replaceVisible = false;
+                if (normalized.startsWith("visible_in_app:")) {
+                    sawVisible = true;
+                    if (normalizeVisibleZero) replaceVisible = true;
                 }
                 if (removeCountClear && normalized.startsWith("maneuver_count:")) {
                     drop = true;
@@ -215,14 +229,28 @@ public class AmapRouteGuidance extends RouteGuidance {
                 }
 
                 if (!drop) {
-                    out.append(line);
+                    if (replaceVisible) {
+                        out.append("visible_in_app:n:-1");
+                        if (hadCR) out.append('\r');
+                    } else {
+                        out.append(line);
+                    }
                     if (hadNewline) out.append('\n');
                 }
                 pos = eol + 1;
             }
+
+            /* A previous genuine stop may have left visible=0 cached in the
+             * base RouteGuidance.  Positive route evidence can arrive before
+             * Amap sends another visible field, so explicitly clear authority. */
+            if (normalizeVisibleZero && !sawVisible) {
+                if (out.length() > 0 && out.charAt(out.length() - 1) != '\n') out.append('\n');
+                out.append("visible_in_app:n:-1\n");
+            }
+
             return out.toString().getBytes("UTF-8");
         } catch (Exception e) {
-            Log.e(TAG, "Failed to filter Amap lifecycle frame", e);
+            Log.e(TAG, "Failed to normalize Amap lifecycle frame", e);
             return payload;
         }
     }
@@ -246,7 +274,7 @@ public class AmapRouteGuidance extends RouteGuidance {
             long sleepMs;
             synchronized (this) {
                 if (generation != softInactiveGeneration || !softInactiveTimerRunning
-                    || !softInactiveLatched) {
+                    || !softInactiveLatched || !compatActive) {
                     return;
                 }
                 if (AmapCompatibility.isHardClear(rawRouteState, rawSourceSupportsRg)) {
@@ -260,6 +288,7 @@ public class AmapRouteGuidance extends RouteGuidance {
                     softInactiveTimerRunning = false;
                     softInactiveLatched = false;
                     softInactiveStartedMs = 0L;
+                    compatActive = false;
                     Log.i(TAG, "RG soft-inactive grace expired; forwarding visible_in_app=0");
                     forwardSoftInactiveExpiry();
                     return;
@@ -300,5 +329,6 @@ public class AmapRouteGuidance extends RouteGuidance {
         rawVisibleInApp = -1;
         rawSourceSupportsRg = -1;
         lastGuidanceEvidenceMs = 0L;
+        compatActive = false;
     }
 }
