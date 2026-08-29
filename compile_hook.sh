@@ -8,14 +8,24 @@ QNX_REMOTE_DIR="${QNX_REMOTE_DIR:-/tmp/carplay_hook}"
 SSH_OPTS="${SSH_OPTS:--oHostKeyAlgorithms=+ssh-rsa -oPubkeyAcceptedAlgorithms=+ssh-rsa}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-HOOK_DIR="$SCRIPT_DIR/c_hook"
+BASE_HOOK_DIR="$SCRIPT_DIR/c_hook"
 BUILD_DIR="${BUILD_DIR:-$SCRIPT_DIR/build}"
+HOOK_DIR="$BUILD_DIR/c_hook-v38-amap"
 OUT="${HOOK_OUT:-$BUILD_DIR/libcarplay_hook.so}"
+OVERLAY="$SCRIPT_DIR/tools/apply_v38_amap_overlay.py"
 mkdir -p "$(dirname "$OUT")"
 
-for cmd in sshpass ssh scp tar; do
+for cmd in sshpass ssh scp tar python3; do
     command -v "$cmd" >/dev/null 2>&1 || { echo "ERROR: missing $cmd" >&2; exit 1; }
 done
+[ -f "$OVERLAY" ] || { echo "ERROR: missing $OVERLAY" >&2; exit 1; }
+
+# Keep c_hook byte-for-byte based on the vehicle-tested main source.  Patch a
+# disposable build copy with only the v38 Amap physical-head metadata fields.
+rm -rf "$HOOK_DIR"
+mkdir -p "$HOOK_DIR"
+cp -R "$BASE_HOOK_DIR"/. "$HOOK_DIR"/
+python3 "$OVERLAY" --native "$HOOK_DIR/routeguidance/rgd_hook.c"
 
 FRAMEWORK_SRCS="framework/logging.c framework/bus.c framework/iap2_protocol.c framework/hook_framework.c"
 RGD_SRCS="routeguidance/rgd_tlv.c routeguidance/rgd_hook.c"
@@ -39,7 +49,7 @@ REMOTE="$QNX_USER@$QNX_VM"
 SSH=(sshpass -p "$QNX_PASSWORD" ssh $SSH_OPTS "$REMOTE")
 SCP=(sshpass -p "$QNX_PASSWORD" scp $SSH_OPTS)
 
-echo "=== CarPlay Hook Build ==="
+echo "=== CarPlay Hook Build (main + v38 Amap metadata) ==="
 echo "QNX host: $REMOTE"
 echo "Remote directory: $QNX_REMOTE_DIR"
 echo "Output: $OUT"
