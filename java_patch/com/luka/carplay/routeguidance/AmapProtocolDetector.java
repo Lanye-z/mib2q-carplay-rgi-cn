@@ -17,7 +17,7 @@ import com.luka.carplay.framework.CarplayBus;
  *   session while waiting for real maneuver progress.
  *
  * V38_COMPAT
- *   The ambiguous zero was followed by positive maneuver/detail progress.
+ *   The ambiguous zero was followed by actual route/maneuver progress.
  *   The session is therefore treated with the v38-derived compatibility
  *   state machine until a hard route end or source change.
  */
@@ -31,17 +31,34 @@ final class AmapProtocolDetector {
     private boolean activeRouteSeen = false;
     private long probeStartedMs = 0L;
 
+    /* Baseline captured from the ambiguous 1/0/0 snapshot.  Current main
+     * native publishes full-state snapshots, so mere key presence on the next
+     * bus frame is NOT proof of continuing guidance.  Confirmation must show
+     * a real state change relative to this baseline. */
+    private int probeRouteSeq = -1;
+    private int probeRouteGeneration = -1;
+    private int probeHeadIapIndex = -1;
+    private int probeDistanceM = -1;
+
     void reset() {
         mode = MODE_LEGACY;
         sourceName = null;
         activeRouteSeen = false;
-        probeStartedMs = 0L;
+        clearProbe();
     }
 
     void resetRouteOnly() {
         mode = MODE_LEGACY;
         activeRouteSeen = false;
+        clearProbe();
+    }
+
+    private void clearProbe() {
         probeStartedMs = 0L;
+        probeRouteSeq = -1;
+        probeRouteGeneration = -1;
+        probeHeadIapIndex = -1;
+        probeDistanceM = -1;
     }
 
     int mode() {
@@ -72,9 +89,8 @@ final class AmapProtocolDetector {
 
     private boolean sourceAllowsBehaviorProbe() {
         /* Some current-hook snapshots do not expose source_name to Java even
-         * though the 0x5200 option was requested.  In that case fall back to
-         * the strict protocol signature below.  If a known non-Amap source is
-         * available, do not probe it. */
+         * though the 0x5200 option was requested. In that case keep the strict
+         * behavior fallback. A known non-Amap source is never probed. */
         return sourceName == null || sourceName.length() == 0 || isAmap();
     }
 
@@ -110,19 +126,25 @@ final class AmapProtocolDetector {
             && sourceSupportsRg != 0;
     }
 
-    void beginProbe(long nowMs) {
+    void beginProbe(long nowMs, CarplayBus.Data d) {
         mode = MODE_PROBING;
         probeStartedMs = nowMs;
+        if (d != null) {
+            probeRouteSeq = d.num("amap_route_update_seq", -1);
+            probeRouteGeneration = d.num("amap_route_generation", -1);
+            probeHeadIapIndex = d.num("amap_head_iap_index", -1);
+            probeDistanceM = d.num("dist_maneuver_m", -1);
+        }
     }
 
     void confirmV38() {
         mode = MODE_V38_COMPAT;
-        probeStartedMs = 0L;
+        clearProbe();
     }
 
     void rejectProbe() {
         mode = MODE_LEGACY;
-        probeStartedMs = 0L;
+        clearProbe();
     }
 
     long probeStartedMs() {
@@ -130,26 +152,41 @@ final class AmapProtocolDetector {
     }
 
     /**
-     * Require real maneuver progress to confirm the new protocol. ETA/time
-     * alone are intentionally not sufficient because they can coexist with a
-     * legitimate legacy inactive transition.
+     * Confirm only real progress relative to the protected 1/0/0 baseline.
+     *
+     * main's native hook emits full-state snapshots, so cached mX_* fields or
+     * an unchanged positive distance can appear on every bus frame. They must
+     * not by themselves switch a legacy/older session into V38_COMPAT.
      */
     boolean hasV38ConfirmationEvidence(CarplayBus.Data d) {
         if (d == null) return false;
 
+        if (d.has("route_state") && d.num("route_state", -1) > 1) return true;
         if (d.has("maneuver_count") && d.num("maneuver_count", 0) > 0) return true;
         if (d.has("maneuver_list")) {
             int[] list = d.intList("maneuver_list");
             if (list != null && list.length > 0) return true;
         }
-        if (d.has("dist_maneuver_m") && d.num("dist_maneuver_m", -1) > 0) return true;
 
-        for (int i = 0; i < 32; i++) {
-            String p = "m" + i + "_";
-            if (d.has(p + "type") || d.has(p + "ver") || d.has(p + "distance")
-                    || d.has(p + "turn_angle") || d.has(p + "name")
-                    || d.has(p + "after_road")) {
-                return true;
+        int gen = d.num("amap_route_generation", -1);
+        if (gen >= 0 && probeRouteGeneration >= 0 && gen != probeRouteGeneration)
+            return true;
+
+        int head = d.num("amap_head_iap_index", -1);
+        if (head >= 0 && probeHeadIapIndex >= 0 && head != probeHeadIapIndex)
+            return true;
+        if (head >= 0 && probeHeadIapIndex < 0)
+            return true;
+
+        int dist = d.num("dist_maneuver_m", -1);
+        if (dist > 0) {
+            if (probeDistanceM <= 0) return true;
+            if (dist != probeDistanceM) {
+                int seq = d.num("amap_route_update_seq", -1);
+                /* With native metadata, require a later 0x5201. Without it,
+                 * a changed positive distance is still useful fallback proof. */
+                if (seq < 0 || probeRouteSeq < 0 || seq != probeRouteSeq)
+                    return true;
             }
         }
         return false;
