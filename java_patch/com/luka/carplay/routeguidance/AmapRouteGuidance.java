@@ -86,7 +86,7 @@ public class AmapRouteGuidance extends RouteGuidance {
                 return;
             }
 
-            detector.beginProbe(System.currentTimeMillis());
+            detector.beginProbe(System.currentTimeMillis(), d);
             Log.i(TAG, "LEGACY -> PROBING source=" + safe(detector.sourceName())
                 + " route=" + rawRouteState + " count=" + rawManeuverCount
                 + " visible=" + rawVisibleInApp);
@@ -180,8 +180,8 @@ public class AmapRouteGuidance extends RouteGuidance {
 
     /**
      * In v38 mode visible_in_app=0 is not authoritative while real guidance
-     * is active.  The original v38 lifecycle keeps the route alive when
-     * maneuver/route evidence continues.  Present 0 to main only for the exact
+     * is active. The original v38 lifecycle keeps the route alive when
+     * maneuver/route evidence continues. Present 0 to main only for the exact
      * 1/0/0 soft-inactive state (where AmapV38Compat either holds it as -1 or,
      * after grace expiry, deliberately lets the real 0 through).
      */
@@ -190,7 +190,7 @@ public class AmapRouteGuidance extends RouteGuidance {
         if (rawVisibleInApp != 0 || rawRouteState <= 0 || rawSourceSupportsRg == 0)
             return payload;
 
-        /* Exact soft-inactive lifecycle is owned by AmapV38Compat.  Before
+        /* Exact soft-inactive lifecycle is owned by AmapV38Compat. Before
          * expiry it already emits -1; after expiry it must be allowed to emit
          * the real 0 so main performs its normal shutdown. */
         if (rawRouteState == 1 && rawManeuverCount == 0)
