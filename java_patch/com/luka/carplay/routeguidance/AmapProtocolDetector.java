@@ -11,7 +11,7 @@ import com.luka.carplay.framework.CarplayBus;
  *   Existing/main behavior. Frames are forwarded unchanged.
  *
  * PROBING
- *   Amap emitted the newer ambiguous lifecycle signature
+ *   The newer ambiguous lifecycle signature appeared:
  *   route_state=1 + maneuver_count=0 + visible_in_app=0 while a route had
  *   already become active. The caller temporarily protects the current RG
  *   session while waiting for real maneuver progress.
@@ -70,6 +70,14 @@ final class AmapProtocolDetector {
         return isAmapSourceName(sourceName);
     }
 
+    private boolean sourceAllowsBehaviorProbe() {
+        /* Some current-hook snapshots do not expose source_name to Java even
+         * though the 0x5200 option was requested.  In that case fall back to
+         * the strict protocol signature below.  If a known non-Amap source is
+         * available, do not probe it. */
+        return sourceName == null || sourceName.length() == 0 || isAmap();
+    }
+
     static boolean isAmapSourceName(String value) {
         if (value == null) return false;
         String text = value.trim();
@@ -94,7 +102,7 @@ final class AmapProtocolDetector {
     boolean shouldBeginProbe(int routeState, int maneuverCount, int visibleInApp,
                              int sourceSupportsRg) {
         return mode == MODE_LEGACY
-            && isAmap()
+            && sourceAllowsBehaviorProbe()
             && activeRouteSeen
             && routeState == 1
             && maneuverCount == 0
