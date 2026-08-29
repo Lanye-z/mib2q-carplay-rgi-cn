@@ -14,6 +14,7 @@ package com.luka.carplay;
 import com.luka.carplay.cursor.CursorController;
 import com.luka.carplay.framework.CarplayBus;
 import com.luka.carplay.framework.Log;
+import com.luka.carplay.routeguidance.AmapRouteGuidance;
 import com.luka.carplay.routeguidance.RouteGuidance;
 import de.audi.app.terminalmode.IContext;
 import de.audi.app.terminalmode.device.IActiveDeviceStateListener;
@@ -154,8 +155,12 @@ public class CarPlayHook {
             return false;
         }
 
-        /* Initialize route guidance module */
-        routeGuidance = new RouteGuidance();
+        /* Initialize route guidance module.
+         * AmapRouteGuidance wraps the current implementation and only adds the
+         * v38/iOS27 soft-inactive lifecycle compatibility; all current BAP,
+         * renderer and stock-navigation handoff fixes remain in RouteGuidance
+         * and BAPBridge. */
+        routeGuidance = new AmapRouteGuidance();
         if (!routeGuidance.init(naviService)) {
             Log.e(TAG, "RouteGuidance init failed");
             routeGuidance = null;
