@@ -108,12 +108,19 @@ public class AmapRouteGuidance extends RouteGuidance {
          */
         boolean suppressVisibleZero = rawVisibleInApp == 0
             && (graceActive || rawRouteState > 0 || rawManeuverCount > 0 || freshEvidence);
-        boolean suppressTransientClear = graceActive && softInactive;
+        boolean suppressTransientCountClear = graceActive && softInactive
+            && d.has("maneuver_count") && rawManeuverCount == 0;
+        boolean suppressTransientListClear = false;
+        if (graceActive && softInactive && d.has("maneuver_list")) {
+            int[] list = d.intList("maneuver_list");
+            suppressTransientListClear = (list == null || list.length == 0);
+        }
 
         byte[] forwarded = payload;
         int forwardedLen = len;
-        if (suppressVisibleZero || suppressTransientClear) {
-            forwarded = filterPayload(payload, len, suppressVisibleZero, suppressTransientClear);
+        if (suppressVisibleZero || suppressTransientCountClear || suppressTransientListClear) {
+            forwarded = filterPayload(payload, len, suppressVisibleZero,
+                suppressTransientCountClear, suppressTransientListClear);
             forwardedLen = forwarded.length;
         }
 
@@ -179,14 +186,18 @@ public class AmapRouteGuidance extends RouteGuidance {
     }
 
     private byte[] filterPayload(byte[] payload, int len, boolean removeVisibleZero,
-                                 boolean preserveTransientClear) {
+                                 boolean removeCountClear, boolean removeListClear) {
         try {
             String text = new String(payload, 0, len, "UTF-8");
-            String[] lines = text.split("\\n", -1);
             StringBuffer out = new StringBuffer(text.length());
+            int pos = 0;
 
-            for (int i = 0; i < lines.length; i++) {
-                String line = lines[i];
+            while (pos < text.length()) {
+                int eol = text.indexOf('\n', pos);
+                boolean hadNewline = eol >= 0;
+                if (!hadNewline) eol = text.length();
+
+                String line = text.substring(pos, eol);
                 String normalized = line;
                 if (normalized.endsWith("\r")) {
                     normalized = normalized.substring(0, normalized.length() - 1);
@@ -196,17 +207,18 @@ public class AmapRouteGuidance extends RouteGuidance {
                 if (removeVisibleZero && normalized.startsWith("visible_in_app:")) {
                     drop = true;
                 }
-                if (preserveTransientClear && normalized.startsWith("maneuver_count:")) {
+                if (removeCountClear && normalized.startsWith("maneuver_count:")) {
                     drop = true;
                 }
-                if (preserveTransientClear && normalized.startsWith("maneuver_list:")) {
+                if (removeListClear && normalized.startsWith("maneuver_list:")) {
                     drop = true;
                 }
 
                 if (!drop) {
                     out.append(line);
-                    if (i < lines.length - 1) out.append('\n');
+                    if (hadNewline) out.append('\n');
                 }
+                pos = eol + 1;
             }
             return out.toString().getBytes("UTF-8");
         } catch (Exception e) {
