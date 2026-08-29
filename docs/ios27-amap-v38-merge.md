@@ -1,225 +1,198 @@
-# iOS27 / Amap v38 second-generation merge
+# Amap v38 state engine on the vehicle-tested main backend
 
 Branch: `ios27-amap-v38-merge`
 
-## Design goal
+## Goal
 
-This branch uses the vehicle-tested repository `main` as the product baseline. It does **not** replace the main BAP, renderer or native route-guidance implementation with the supplied v38 binaries.
+Keep the current repository's vehicle-tested `main` display/backend behavior intact, and add only the v38 Amap input semantics that are needed for newer/iOS27-like Amap route-guidance behavior.
 
-The design rule is:
+The output side remains `main`: first-real-maneuver renderer startup, signed U-turn direction, China-specific 350 m / 1000 m / >2 km approach policy, Always-On/FOLLOW_STREET behavior, BAP/renderer synchronization and native-navigation handoff are not replaced by the older v38 display/backend implementation.
+
+The v38-derived part is limited to Amap route-input trust and stabilization: soft-inactive tolerance, physical maneuver identity, formal-lock, display stabilization, rollover and progress pairing.
+
+## Architecture
 
 ```text
-trusted main output/lifecycle logic
-        +
-v38-derived Amap input/state semantics only
+CarPlay iAP2
+    |
+    v
+main native route-guidance hook
+    |  + v38 Amap metadata overlay
+    |    - amap_route_generation
+    |    - amap_route_update_seq
+    |    - amap_head_iap_index
+    |    - amap_head_aligned
+    |    - amap_distance_fresh
+    v
+AmapRouteGuidance
+    |
+    +-- legacy / known non-Amap ----------------------+
+    |                                                 |
+    |                                                 v
+    +-- iOS27-like Amap -> v38 Amap state engine -> main RouteGuidance
+                                                      |
+                                                      v
+                                                 main BAPBridge
+                                                      |
+                                                      v
+                                                main Renderer
 ```
-
-The main implementation therefore remains authoritative for:
-
-- first-real-maneuver renderer startup and PRELOAD / FRAME_READY timing;
-- 350 m / 1000 m / >2 km China approach-window policy;
-- Always-On / FOLLOW_STREET display behavior;
-- signed U-turn direction mapping;
-- renderer / BAP synchronization;
-- route-stop cleanup and native-navigation handoff;
-- existing main native route-state-zero debounce, slot cache and `mVer` behavior.
 
 ## Why this is different from the first merge
 
-The first merge used `AmapV38Compat` mainly as a text-payload filter in front of `RouteGuidance`. During HOLD it removed selected delta fields and tried to make the remaining payload look like v38 output.
+The first merge implemented a compatibility shim around text deltas. HOLD was achieved by dropping selected `maneuver_list`, distance and `mX_*` keys. Because the bus is incremental, that could leak a new `mVer`, distance, exit-info or other field into an old display state, or permanently lose a field that iOS did not resend.
 
-That design could leak a mixture of old and new state because CarPlay route-guidance traffic is incremental. For example, an old maneuver list could coexist with a new `mVer`, exit angle, road field or lane field if only part of a candidate frame was suppressed.
+The second-generation engine owns a complete raw cache and a separate complete committed display snapshot. A HOLD returns the whole committed snapshot atomically. The main backend therefore cannot receive mixed old/new maneuver identity, visual, text, lane and distance fields.
 
-The second-generation engine no longer treats HOLD as "drop a few lines".
+The visual key also includes `SideStreets`, and `turn_angle` / `exit_angle` are cached separately.
 
-```text
-raw Amap deltas
-      |
-      v
-complete RawState cache
-      |
-      +--> FormalLock
-      +--> DisplayStabilizer
-      +--> RolloverStateMachine
-      +--> ProgressTracker
-      |
-      v
-complete committed display snapshot
-      |
-      v
-main RouteGuidance -> main BAPBridge -> main RendererServer
-```
+## Amap lifecycle routing
 
-During HOLD, a complete committed snapshot is serialized. Main therefore sees one self-consistent state instead of a partially filtered delta.
-
-## Protocol routing
-
-Compatibility is behavior-based rather than hard-coded to an iOS version.
+`AmapRouteGuidance` remains behavior-based rather than hard-coded to an iOS version.
 
 ```text
 LEGACY
   |
-  | active route later reports
-  | route_state=1 + maneuver_count=0 + visible_in_app=0
+  | already-active route later reports
+  | route_state=1, maneuver_count=0, visible_in_app=0
   v
-PROBING (up to 5 s)
+PROBING (max 5 s)
   |\
-  | \ no continuing maneuver evidence / visible returns to 1
-  |  +------------------------------------------> LEGACY
+  | \ no continuing maneuver evidence / visible recovers
+  |  +---------------------------------------------> LEGACY
   |
-  | real maneuver/list/distance/slot evidence continues
+  | real maneuver/list/distance/detail evidence continues
   v
 V38_COMPAT
   |
   | route_state=0 / source_supports_rg=0 / disconnect
   v
-reset for next route
+reset for the next route
 ```
 
-### LEGACY
+A known non-Amap source stays on the unmodified main path.
 
-Frames go directly to the original main `RouteGuidance`. No Amap display-state filtering is applied. A known non-Amap source never enters the Amap compatibility path.
+## v38 soft-inactive behavior
 
-This is intentionally kept for older/legacy Amap behavior so lower-iOS sessions can retain the tested main path unless the newer ambiguous lifecycle is actually observed.
+For Amap in V38 mode:
 
-### PROBING
+- `route_state=0` and `source_supports_rg=0` remain hard clears;
+- `route_state=1`, `maneuver_count=0`, `visible_in_app=0` is soft inactive;
+- the previous committed display is retained for a 5-second grace window;
+- maneuver, distance, ETA/time and other genuine guidance evidence refresh the grace anchor;
+- an independent timer expires the hold even when no new bus update arrives.
 
-The ambiguous `1 / 0 / 0` transition is temporarily protected without permanently selecting v38 mode:
+No synthetic `visible_in_app=1` writeback is used.
 
-- `visible_in_app=0` is exposed to main as unknown (`-1`), not rewritten to active (`1`);
-- transient zero maneuver count/list clears are held;
-- real maneuver progress must follow before V38 mode is confirmed;
-- ETA/time by themselves do not confirm the newer behavior.
+## v38 native Amap metadata
 
-If no confirmation arrives within five seconds, normal main inactive semantics are restored.
+The supplied v38 binary exposes five metadata values on every normal route-guidance snapshot. They are now added as a build overlay on top of the current main native source rather than replacing the complete main `libcarplay_hook.so`.
 
-### V38_COMPAT
+### `amap_route_generation`
 
-Once confirmed for the route, the v38-derived state engine owns Amap display acceptance while the main backend remains unchanged.
+Starts non-zero and advances on authoritative Amap route/head identity changes and hard route resets. Java uses it together with the raw iAP head to distinguish physical maneuvers across reroute/rollover boundaries.
 
-## v38 semantics implemented
+### `amap_route_update_seq`
 
-### Complete raw cache
+Advances on each accepted 0x5201 route update. It is retained for v38-compatible diagnostics/replay identity; it is not artificially used as a replacement for the v38 two-frame display-stabilizer logic.
 
-The engine independently caches top-level route fields, full maneuver-slot fields, exit angle, junction angles, road text, lane data and lane-guidance cache data. `mX_exit_angle` is kept separate from `mX_turn_angle`.
+### `amap_head_iap_index`
 
-### Visual identity
+The raw iAP2 index at the head of the most recent ManeuverList, before main remaps maneuver indexes to bounded Java slots.
 
-The visual key includes:
+### `amap_distance_fresh`
+
+For a newly listed head, this is true only when the same 0x5201 also supplies `DistToManeuver`. A later distance-bearing 0x5201 can refresh it.
+
+### `amap_head_aligned`
+
+Recomputed whenever a bus snapshot is built. It is true only when:
+
+1. a raw iAP head exists;
+2. distance is fresh for that head; and
+3. that raw head currently maps to a cached maneuver slot containing a valid maneuver type.
+
+This prevents a new ManeuverList head from being paired with stale detail/distance data.
+
+## Main native behavior deliberately preserved
+
+The overlay does **not** replace or rewrite the current main implementations of:
+
+- route_state=0 debounce;
+- maneuver slot mapping and active-slot eviction protection;
+- `mVer` assignment versions;
+- maneuver/lane caches;
+- current bus snapshot structure;
+- existing source-support hard clear;
+- renderer/BAP/handoff logic.
+
+The native additions are appended observational metadata plus their v38 update bookkeeping.
+
+## Java metadata authority and fallback
+
+The generated Java build prefers the five native v38 metadata fields when they are present:
 
 ```text
-BAP main element
-+ BAP direction
-+ z-level
-+ SideStreets bytes
+physical identity  -> native generation + raw iAP head
+head validity      -> native amap_head_aligned
+distance pairing   -> native amap_distance_fresh
 ```
 
-`FOLLOW_STREET`, `NO_INFO` and `NO_SYMBOL` collapse to the same FOLLOW_STREET visual identity, matching the v38 intent.
+If the JAR is accidentally paired with an older/main `.so` that does not publish these keys, the second-generation Amap engine falls back to the existing `slot + mVer + Java cache/generation` behavior rather than failing completely.
 
-### Formal lock
+For full v38-equivalent Amap identity/freshness behavior, deploy the newly built JAR and newly built `libcarplay_hook.so` together.
 
-A committed formal turn is protected from a late prompt or neutral-straight node for the same physical maneuver.
+## Build overlays
 
-### Display stabilizer
-
-The v38 decision model is retained:
+The readable source trees remain based on the tested main implementation. `build_java.sh` and `compile_hook.sh` make disposable copies under `build/` and apply:
 
 ```text
-PASS
-HOLD
-ACCEPT_SAME_VISUAL
-COMMIT_NEW_VISUAL
-COMMIT_NEW_PHYSICAL
+tools/apply_v38_amap_overlay.py
 ```
 
-A changed visual candidate must remain stable before replacing the committed snapshot. Distance jumps above the 8 m jitter allowance reset/hold the candidate.
+The patcher uses exact source anchors and aborts if the main source has drifted, preventing a silent half-applied build.
 
-A same-visual physical identity change can be accepted internally without changing the visible `mVer`, preventing main from unnecessarily reanimating the same arrow.
-
-### Same-visual rollover
-
-A completed maneuver can advance to a later physical maneuver with the same visual identity without requiring an artificial different arrow between them.
-
-### Progress pairing
-
-Distance is tracked against the accepted physical identity and is normally monotonic decreasing. A transient distance increase is suppressed instead of pairing a new distance with the old visual maneuver.
-
-### Soft inactive lifecycle
-
-After V38 mode is confirmed, `route_state=1 + maneuver_count=0 + visible_in_app=0` becomes a soft-inactive state rather than an immediate teardown.
-
-The committed snapshot is retained during a five-second grace period. Fresh guidance evidence can extend the grace. An independent timer expires the hold even if no further bus frame arrives, after which the real inactive state is forwarded to main.
-
-Hard clear remains immediate for `route_state=0`, `source_supports_rg=0` or disconnect.
-
-## Main files deliberately not changed
-
-Relative to `main`, this branch does not modify:
-
-```text
-RouteGuidance.java
-BAPBridge.java
-ManeuverMapper.java
-RendererMapper.java
-RendererServer.java
-SideStreets.java
-c_hook/*
-c_render/*
-```
-
-`CarPlayHook` only selects `AmapRouteGuidance` as the RouteGuidance wrapper. Output behavior still comes from the existing main classes.
-
-## Native metadata choice
-
-The supplied v38 native binary exposes additional Amap metadata such as route generation/raw head/alignment/fresh-distance state. This branch deliberately does **not** replace main `libcarplay_hook.so` in the first second-generation implementation.
-
-Physical identity is therefore derived from the main hook's stable slot + `mVer` information plus a route-session generation maintained by the Java Amap engine. Head alignment and distance freshness are conservatively derived from the complete Java raw cache.
-
-This keeps the native layer identical to the tested main build. If road testing later identifies an edge case that specifically requires the v38 raw-head metadata, those fields can be added to main native as additive bus metadata without replacing its existing debounce/cache logic.
-
-## Build
-
-This branch returns to the normal main source build. No v38 ZIP is required.
+### Java
 
 ```bash
 ./build_java.sh
 ```
 
-The result is the normal main-style `carplay_hook.jar`. If the vehicle already runs main native/renderer files, this second-generation merge is intended to be a JAR-only update.
+The builder patches only the temporary copy of `AmapV38Compat.java`, then compiles with the normal Java 8 / target-1.2 toolchain.
 
-## Validation performed before commit
+### Native hook
 
-The new Amap classes were compiled against the existing main `carplay_hook.jar` as the actual classpath. This verifies the real method/API contracts used by the merge, including `CarplayBus.Data`, `ManeuverMapper` and `SideStreets`.
-
-A full MHI2Q Java-1.2 release build still needs the repository's normal Java 8 / `lsd.jar` build environment.
-
-## First vehicle-test checklist
-
-### Main regression
-
-- Apple Maps first arrow still follows the main first-real-maneuver startup path;
-- no new black/FOLLOW_STREET placeholder is exposed before the first real arrow;
-- 350 m / 1000 m / >2 km behavior is unchanged;
-- signed U-turn remains unchanged;
-- CarPlay stop/disconnect handoff remains unchanged.
-
-### Lower-iOS / legacy Amap
-
-- no `LEGACY -> PROBING` transition during normal operation unless the `1/0/0` signature actually appears;
-- normal turn/rollover behavior remains the main path;
-- route end remains immediate when the old protocol sends `route_state=0`.
-
-### iOS27-like Amap
-
-Expected transition:
-
-```text
-[AmapRouteGuidance2] LEGACY -> PROBING ...
-[AmapRouteGuidance2] PROBING -> V38_COMPAT ...
-[AmapV38Compat2] v38 Amap engine enabled ...
+```bash
+./compile_hook.sh
 ```
 
-During navigation, diagnostics can include:
+The builder patches only the temporary copy of `c_hook/routeguidance/rgd_hook.c`, then uses the existing QNX 6.5 ARM toolchain flow.
+
+The renderer is unchanged and does not need to be rebuilt for this metadata change.
+
+## Expected native bus fields
+
+With the new `.so`, route-guidance snapshots should contain lines similar to:
+
+```text
+amap_route_generation:n:...
+amap_route_update_seq:n:...
+amap_head_iap_index:n:...
+amap_head_aligned:n:0|1
+amap_distance_fresh:n:0|1
+```
+
+## Expected Amap logs
+
+For the previously failing iOS27-like sequence:
+
+```text
+[AmapRouteGuidance] Protocol LEGACY -> PROBING: ...
+[AmapRouteGuidance] Protocol PROBING -> V38_COMPAT: continuing maneuver data ...
+[AmapV38Compat2] v38 Amap engine enabled: gen=... rawHead=... seq=... nativeMeta=true ...
+```
+
+During navigation diagnostics may include:
 
 ```text
 [V38-FORMAL-LOCK]
@@ -228,4 +201,15 @@ During navigation, diagnostics can include:
 [V38-ROLLOVER]
 ```
 
-The former immediate `RG deactivate` on the transient `1/0/0` frame should not occur while valid maneuver guidance resumes within the grace period.
+A true route end still follows the current main teardown/handoff path.
+
+## Deployment note
+
+Because this revision adds native metadata, it is no longer a JAR-only change when upgrading from plain main. For the intended full behavior, update both:
+
+```text
+carplay_hook.jar
+libcarplay_hook.so
+```
+
+`maneuver_render` and `flag_atlas.rgba` remain the current main versions and are unchanged by this branch.
