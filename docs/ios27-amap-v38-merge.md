@@ -1,60 +1,141 @@
-# iOS 27 / Amap v38 compatibility merge
+# Amap legacy / v38 dual-protocol compatibility
 
 Branch: `ios27-amap-v38-merge`
 
 ## Goal
 
-Preserve the current repository's vehicle-tested fixes (first-frame renderer startup, U-turn direction mapping, China-specific approach thresholds, native-navigation handoff, renderer/BAP cleanup) while restoring the Amap lifecycle tolerance found in the supplied `20260813_v38.zip` build.
+Keep the current repository's vehicle-tested `main` behavior unchanged for legacy/older Amap protocol sessions, while enabling the supplied `20260813_v38.zip`-derived compatibility state machine only when the newer Amap lifecycle behavior is actually observed.
 
-## Why iOS 27 fails on the current lifecycle gate
+This is intentionally **behavior based**, not hard-coded to an iOS version number. That avoids changing a working iOS 17/18/26 Amap path simply because a phone OS version matches a range, and it also allows the same compatibility path to survive later iOS releases if they keep the new behavior.
 
-Observed iOS 27 + Amap sequence:
+The current repository's first-frame renderer startup, U-turn direction mapping, China-specific approach thresholds, native-navigation handoff, BAP cleanup, renderer cleanup and native `route_state=0` debounce remain the output/backend implementation in both modes.
 
-1. Route Guidance starts normally (`route_state=3`, `source_supports_rg=1`).
-2. Renderer connects and produces its first frame.
-3. Amap reports `route_state=1`, `maneuver_count=0`, `visible_in_app=0`.
-4. Maneuver count/list/distance arrive shortly afterward and continue updating.
+## Protocol router
 
-The current `RouteGuidance` treats an explicit `visible_in_app=0` as authoritative and tears down BAP + renderer before step 4 arrives.
-
-## v38 behavior adapted here
-
-The merge intentionally does not overwrite the current `BAPBridge`, renderer, or native hook with older binaries. Instead it adds a compatibility adapter around the current `RouteGuidance`:
-
-- `route_state=0` or `source_supports_rg=0` is a hard clear.
-- `route_state=1`, `maneuver_count=0`, `visible_in_app=0` is a soft-inactive state.
-- An already active route gets a 5-second grace window.
-- Maneuver/list/distance/ETA/lane updates count as fresh guidance evidence and keep the route alive.
-- A non-authoritative Amap `visible_in_app=0` is interpreted by the existing `RouteGuidance` as `-1` (unknown), not rewritten to `1`.
-- During the grace window, transient `maneuver_count=0` and empty maneuver-list clears are held so the current maneuver snapshot does not flash to `NO_SYMBOL`.
-- If no fresh guidance evidence arrives before the grace expires, the real `visible_in_app=0` is forwarded and the existing full shutdown path runs.
-- An internal active latch prevents repeated zero-only frames from re-spawning the renderer after a genuine soft-inactive expiry.
-
-## Native hook decision
-
-The current repository's `rgd_hook.c` already contains route-state-zero debounce and maneuver-cache preservation. Those changes are newer/more suitable than replacing the hook with the supplied v38 binary, so the native hook is intentionally left unchanged.
-
-## Expected iOS 27 log behavior
-
-For the previously failing sequence, the branch should show:
+`AmapRouteGuidance` now has three session states:
 
 ```text
-[AmapRouteGuidance] RG soft-inactive window started: route_state=1 maneuver_count=0 visible_in_app=0 ...
+LEGACY
+  |
+  | already-active route later reports
+  | route_state=1, maneuver_count=0, visible_in_app=0
+  v
+PROBING  (max 5 s)
+  |\
+  | \ no continuing maneuver evidence / visible returns to 1
+  |  +--------------------------------------> LEGACY
+  |
+  | maneuver_count/list, maneuver distance or maneuver-slot update continues
+  v
+V38_COMPAT
+  |
+  | route_state=0 / source_supports_rg=0 / disconnect
+  v
+LEGACY for the next route
 ```
 
-Then, when `maneuver_count=1/2` and distance/ETA updates arrive within the window, there should be **no immediate**:
+### LEGACY
+
+Frames are passed directly to the original/current `RouteGuidance` implementation without normalization or maneuver stabilization. This is the same path as `main`.
+
+A known non-Amap `source_name` is never switched into the Amap v38 path.
+
+### PROBING
+
+The exact ambiguous lifecycle signature is not enough by itself to permanently enable v38. During the probe only:
+
+- `visible_in_app=0` is presented to the base class as `-1` (unknown), never rewritten to `1`;
+- transient `maneuver_count=0` / empty list clears are held;
+- the existing BAP/renderer session therefore is not destroyed before the next Amap update can arrive.
+
+The probe is confirmed as the newer protocol only if real maneuver progress follows, such as:
+
+- `maneuver_count > 0`;
+- non-empty `maneuver_list`;
+- positive `dist_maneuver_m`;
+- a real `mX_*` maneuver-slot update.
+
+ETA/time alone intentionally do **not** confirm v38 mode because they can coexist with a legitimate legacy inactive transition.
+
+If no confirmation arrives within 5 seconds, the original `visible_in_app=0` semantic is restored and the normal `main` shutdown path runs.
+
+### V38_COMPAT
+
+Once confirmed, the mode is latched only for the current route session. It does not repeatedly switch between main and v38 on every frame.
+
+The compatibility layer adapts the important v38 Amap behavior to the current repository backend:
+
+1. **Lifecycle tolerance**
+   - `visible_in_app=0` is not a hard stop while route/maneuver evidence remains active.
+   - No `visibleInApp=1` state writeback is used, avoiding the previous 0 -> 1 -> 0 dirty-state feedback loop.
+
+2. **Formal maneuver lock**
+   - a committed formal turn is not immediately replaced by a late prompt/neutral straight node for the same physical maneuver.
+
+3. **Display stabilization**
+   - a changed visual/physical maneuver must be stable before it replaces the currently committed frame;
+   - the current adaptation uses the v38 two-frame stabilization intent.
+
+4. **Physical rollover**
+   - the current native hook's `slot + mVer` is used as physical maneuver identity;
+   - this avoids importing the older v38 native binary only to obtain its generation/raw-head metadata.
+
+5. **Progress stabilization**
+   - a transient zero-distance completion frame does not immediately destroy the committed maneuver;
+   - distance increases larger than the v38 8 m jitter threshold are suppressed for the same physical node.
+
+The stabilized result is then sent through the **current main `RouteGuidance -> BAPBridge -> RendererServer` path**, preserving all current vehicle-tested rendering and handoff behavior.
+
+## Why the native hook / renderer are not replaced
+
+The current repository's `rgd_hook.c` already contains newer route-state-zero debounce, maneuver-slot versioning and cache-preservation logic. Replacing it with the older supplied v38 `libcarplay_hook.so` would risk regressing those fixes.
+
+Likewise, the current `BAPBridge` and renderer contain later vehicle-tested fixes that should not be overwritten by the older v38 binaries.
+
+Therefore this branch remains a **JAR-only compatibility change** when the vehicle already has the current `main` native hook and renderer installed.
+
+## Expected log behavior
+
+### Older/legacy Amap
+
+No protocol transition should appear. The session remains in `LEGACY`, and frames follow the original `main` route-guidance path.
+
+### Newer/iOS27-like Amap
+
+The failing sequence should now produce:
+
+```text
+[AmapRouteGuidance] Protocol LEGACY -> PROBING: ...
+[AmapRouteGuidance] Protocol PROBING -> V38_COMPAT: continuing maneuver data ...
+[AmapV38Compat] V38 display compatibility enabled ...
+```
+
+There should be no immediate:
 
 ```text
 [RouteGuidance] RG deactivate: route_state=1 ... visible_in_app=0
 [RendererServer] Sent CMD_SHUTDOWN
 ```
 
-A true route end (`route_state=0`, `source_supports_rg=0`, or actual disconnect) still uses the existing teardown path.
+while maneuver data is still advancing.
 
-## Files changed
+During navigation, optional diagnostic lines may include:
+
+```text
+[V38-FORMAL-LOCK]
+[V38-STABILIZER]
+[V38-PROGRESS]
+[V38-ROLLOVER]
+```
+
+A true route end still follows the existing `main` teardown path.
+
+## Java files changed/added by this branch
 
 - `java_patch/com/luka/carplay/CarPlayHook.java`
 - `java_patch/com/luka/carplay/routeguidance/AmapCompatibility.java`
+- `java_patch/com/luka/carplay/routeguidance/AmapProtocolDetector.java`
 - `java_patch/com/luka/carplay/routeguidance/AmapRouteGuidance.java`
+- `java_patch/com/luka/carplay/routeguidance/AmapV38Compat.java`
 
-The normal Java build script already compiles every `.java` file under `java_patch`, so no build-script change is required.
+No build-script change is required: `build_java.sh` already compiles every `.java` file below `java_patch` into `carplay_hook.jar`.
