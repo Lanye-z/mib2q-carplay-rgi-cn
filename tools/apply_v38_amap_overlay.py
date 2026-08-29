@@ -6,14 +6,13 @@ Build scripts copy that source into build/ and run this patcher there, so the
 resulting binaries add only the v38 Amap metadata contract without replacing
 main route debounce, slot cache, mVer, BAPBridge, renderer or handoff logic.
 
-The patch is deliberately anchor-checked.  If upstream/main source drifts, the
+The patch is deliberately anchor-checked. If upstream/main source drifts, the
 build fails instead of silently producing a half-patched binary.
 """
 
 from __future__ import print_function
 import argparse
 import io
-import os
 import sys
 
 
@@ -48,7 +47,7 @@ def patch_native(path):
         "\t    /* Last merged 0x5201 snapshot (used to make bus writes full-state). */\n"
         "\t    rgd_update_t update_cache;\n"
         "\n"
-        "\t    /* v38 Amap metadata.  Appended to the main state on purpose: no\n"
+        "\t    /* v38 Amap metadata. Appended to main state on purpose: no\n"
         "\t     * existing main field/layout or control flow is replaced. */\n"
         "\t    uint32_t amap_route_generation;\n"
         "\t    uint32_t amap_route_update_seq;\n"
@@ -79,10 +78,8 @@ def patch_native(path):
 /* ============================================================
  * v38 Amap physical-head metadata
  * ============================================================
- * These fields are observational only.  They do not alter main's route-zero
- * debounce, slot allocation, cache eviction or mVer logic; they expose the
- * same physical identity/freshness facts used by the proven v38 Java state
- * machine.
+ * Observational only: this does not alter main's route-zero debounce, slot
+ * allocation/cache eviction, mVer, BAP or renderer control flow.
  */
 static uint32_t amap_meta_next_nonzero(uint32_t value) {
     value++;
@@ -113,22 +110,16 @@ static void amap_meta_refresh_alignment(void) {
         g_rgd.amap_head_aligned = true;
 }
 
-/* Called once for every accepted 0x5201.  Mirrors v38:
- * - update_seq advances for an accepted route update;
- * - a ManeuverList TLV defines the raw iAP2 head;
- * - changing that raw head advances route_generation;
- * - distance is fresh for a newly-listed head only when the same 0x5201
- *   carries DistToManeuver; later distance-only 0x5201 refreshes it.
- * Hard-clear already reset/bumped the head in the authoritative branch, so
- * only update_seq is advanced there (no double generation bump).
- */
+/* One accepted 0x5201 = one update sequence step. A hard clear is authoritative
+ * even if source_supports_rg=0 arrives without route_state=0 in that frame. */
 static void amap_meta_note_route_update(const rgd_update_t* upd, bool hard_clear) {
     g_rgd.amap_route_update_seq = amap_meta_next_nonzero(g_rgd.amap_route_update_seq);
-    if (!upd) {
-        amap_meta_refresh_alignment();
+
+    if (hard_clear) {
+        amap_meta_reset_head(true);
         return;
     }
-    if (hard_clear) {
+    if (!upd) {
         amap_meta_refresh_alignment();
         return;
     }
@@ -140,6 +131,8 @@ static void amap_meta_note_route_update(const rgd_update_t* upd, bool hard_clear
             amap_meta_bump_generation();
             g_rgd.amap_head_iap_index = new_head;
         }
+        /* v38 pairs a freshly selected head only with distance carried by
+         * the same 0x5201. A later distance-only update can refresh it. */
         g_rgd.amap_distance_fresh =
             (upd->present & RGD_UPD_DIST_TO_MANEUVER) != 0;
     } else if (upd->present & RGD_UPD_DIST_TO_MANEUVER) {
@@ -169,8 +162,8 @@ static void amap_meta_note_route_update(const rgd_update_t* upd, bool hard_clear
         "        return;\n"
         "    }\n"
         "\n"
-        "    /* v38 publishes these on every snapshot, including 0x5202-only\n"
-        "     * snapshots.  Re-evaluate alignment after any slot-cache update. */\n"
+        "    /* v38 publishes these on every normal snapshot, including\n"
+        "     * 0x5202-only snapshots. Re-evaluate after slot-cache updates. */\n"
         "    amap_meta_refresh_alignment();\n"
         "    bus_text_uint(b, \"amap_route_generation\", g_rgd.amap_route_generation);\n"
         "    bus_text_uint(b, \"amap_route_update_seq\", g_rgd.amap_route_update_seq);\n"
@@ -195,17 +188,6 @@ static void amap_meta_note_route_update(const rgd_update_t* upd, bool hard_clear
         "\n"
         "    {\n",
         "native-clear-reset")
-
-    text = replace_once(
-        text,
-        "                    rgd_update_cache_reset();\n"
-        "                    rgd_maneuver_map_reset();\n"
-        "                    rgd_cancel_pending_zero_locked(\"hard clear\", 0);",
-        "                    rgd_update_cache_reset();\n"
-        "                    rgd_maneuver_map_reset();\n"
-        "                    amap_meta_reset_head(true);\n"
-        "                    rgd_cancel_pending_zero_locked(\"hard clear\", 0);",
-        "native-hard-clear-reset")
 
     text = replace_once(
         text,
@@ -236,7 +218,6 @@ def patch_java(path):
         "        boolean activeNow = raw.routeState > 0 || raw.maneuverCount > 0\n"
         "            || (raw.maneuverList != null && raw.maneuverList.length > 0);\n"
         "        if (raw.hasNativeAmapMetadata && raw.amapRouteGeneration > 0) {\n"
-        "            /* v38 native generation is authoritative when available. */\n"
         "            routeGeneration = raw.amapRouteGeneration;\n"
         "        } else if (activeNow && !rawRoutePreviouslyActive) {\n"
         "            routeGeneration++;\n"
@@ -262,7 +243,7 @@ def patch_java(path):
         "            physicalRawHead, committed.physicalRawHead);",
         "java-same-physical-call")
 
-    replacements = [
+    pairs = [
         ("formalLock.isLatePrompt(head, ver, routeGeneration, head, type, road)",
          "formalLock.isLatePrompt(head, ver, routeGeneration, physicalRawHead, type, road)",
          "java-formal-lock-raw-head"),
@@ -296,7 +277,7 @@ def patch_java(path):
          "            committed.physicalRawHead);",
          "java-hold-progress-raw-head"),
     ]
-    for old, new, label in replacements:
+    for old, new, label in pairs:
         text = replace_once(text, old, new, label)
 
     text = replace_once(
@@ -359,7 +340,7 @@ def patch_java(path):
         "        int laneGuidanceShowing, laneGuidanceTotal, laneGuidanceIndex, laneGuidanceSlot;\n"
         "        boolean headAligned, distanceFresh;\n"
         "\n"
-        "        /* Exact v38 native identity/freshness contract.  When these keys\n"
+        "        /* Exact v38 native identity/freshness contract. When these keys\n"
         "         * are absent (old/main .so), the existing Java fallback remains. */\n"
         "        boolean hasNativeAmapMetadata;\n"
         "        int amapRouteGeneration, amapRouteUpdateSeq, amapHeadIapIndex;\n"
