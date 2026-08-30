@@ -44,27 +44,27 @@
 5. **调整 renderer 与 BAP 的状态同步**  
    距离条、接近区状态、call-for-action 闪烁及 custom renderer 更新尽量采用同一组状态和时序，减少仪表文字、HUD 与 MOST 箭头画面之间的显示差异。
 
-### 已修改，但尚待实车验证
+6. **支持零距离首帧启动**
+   该问题出现在本项目此前的测试版本中，并非原项目的固有问题。同一 CarPlay 连接内停止并重新开启导航时，首个有效 primary maneuver 的 `dist_maneuver_m` 可能暂时为 `0`；此前的启动条件会因此阻止 renderer 建立。当前代码允许在本次导航首幅 renderer 画面尚未成功显示时，将完整有效且距离为 `0` 的 primary maneuver 作为当前位置的立即动作处理，并按真实类型显示。
 
-1. **零距离首帧启动**  
-   该问题出现在本项目此前的测试版本中，并非原项目的固有问题。同一 CarPlay 连接内停止并重新开启导航时，首个有效 primary maneuver 的 `dist_maneuver_m` 可能暂时为 `0`；此前的启动条件会因此阻止 renderer 建立。当前代码允许在本次导航首幅 renderer 画面尚未成功显示时，将完整有效且距离为 `0` 的 primary maneuver 作为当前位置的立即动作处理，并按真实类型显示。该逻辑尚未完成实车验证。
-
-2. **多次重复 CarPlay 导航与原车导航接管**  （失败）
-   当前已经能够实现一次正常接管，但此前路试发现：原车导航第一次接管并关闭后，再次开启 CarPlay 导航，随后再次停止 CarPlay 导航或断开 CarPlay，原车导航仍可能无法第二次接管路径引导窗口。当前代码已进一步调整退出清理和 gate 释放顺序，但尚未完成重复循环实车验证。
+7. **适配 iOS 26.5.1 及以上版本的高德地图导航数据**
+   iOS 26.5.1 及以上版本中，第三方导航的数据格式和更新时序发生了变化。本项目针对高德地图增加 V38 兼容状态机及 native metadata 协议，处理路径代际、物理 maneuver head 对齐、距离新鲜度、短暂 inactive 状态和 maneuver rollover，避免箭头提前清除、错误跳转或距离冻结，同时保留本项目原有的显示、接管和 renderer 改进。
 
 ### 下载与部署
 
 正式发布文件位于 [`release/`](release/)：
 
 - `release/carplay_hook.jar`
+- `release/libcarplay_hook.so`
 - `release/maneuver_render`
 - `release/SHA256SUMS`
 
-部署时必须同时替换 `carplay_hook.jar` 与 `maneuver_render`，不要将本项目的 JAR 与其他版本的 renderer 混用。
+部署时必须同时替换 `carplay_hook.jar`、`libcarplay_hook.so` 与 `maneuver_render`，不要混用不同版本的文件。上传后请保持 `libcarplay_hook.so` 和 `maneuver_render` 的可执行权限。
 
 | 文件 | SHA-256 |
 | --- | --- |
-| `carplay_hook.jar` | `bd7f04479b269e36c6c1e88d6e52e077135f51fa6016c506895991c9efc6338b` |
+| `carplay_hook.jar` | `94d0356d9a12730aca6dd430552c3aaf15ef9021ce3ddee87a760de966f5ad92` |
+| `libcarplay_hook.so` | `87d10f67fbb3dc142642d899977bab0a6eb4009f61d3bcd873d0cce9e01511f7` |
 | `maneuver_render` | `f86c7a44288d55c352837b3432874cf81836431929e625e7cded42d5664e993e` |
 
 固件配置参考文件位于 [`deploy/`](deploy/)；`build/` 仅用于本地生成的编译产物，不纳入版本控制。
@@ -166,12 +166,13 @@ Windows 本地 renderer 测试：
 
 ### 与原项目不同的部署文件
 
-实际内容发生变化、需要配套替换的部署文件有两个：
+实际内容发生变化、需要配套替换的部署文件有三个：
 
-- `carplay_hook.jar`：Java 侧箭头状态机、首帧启动、显示阈值、掉头方向、生命周期及原车导航接管逻辑；
-- `maneuver_render`：renderer 预加载、首帧确认、显示控制及 Context 恢复逻辑。
+- `carplay_hook.jar`：融合版 Java 逻辑，包含箭头状态机、首帧启动、显示阈值、掉头方向、生命周期、原车导航接管及高德地图 V38 适配；
+- `libcarplay_hook.so`：融合 main hook 与 V38 metadata，向 Java 层提供路径代际、物理 maneuver head 对齐及距离新鲜度等状态；
+- `maneuver_render`：当前 main renderer，包含预加载、首帧确认、显示控制及 Context 恢复逻辑。
 
-`libcarplay_hook.so` 和 `flag_atlas.rgba` 与原项目保持一致。
+`flag_atlas.rgba` 与原项目保持一致。
 
 ---
 
@@ -212,27 +213,27 @@ This project is derived from [luka-dev/mib2q-carplay-rgi](https://github.com/luk
 5. **Aligned renderer and BAP timing**  
    Distance, approach-zone state, call-for-action blinking, and custom-renderer updates share the same state and timing path as far as possible.
 
-### Modified but pending vehicle verification
+6. **Supported zero-distance first-frame startup**
+   This issue was introduced in an earlier test build of this project rather than upstream. When guidance restarts within the same CarPlay connection, the first valid primary maneuver may temporarily report `dist_maneuver_m` as `0`. While the first renderer frame is still pending, a complete valid primary maneuver at distance `0` is now treated as an immediate maneuver at the current position and rendered using its real type.
 
-1. **Zero-distance first-frame startup**  
-   This issue was introduced in an earlier test build of this project rather than upstream. While the first renderer frame is still pending, a complete valid primary maneuver with distance `0` may now be rendered immediately using its real type. Vehicle verification is still pending.
-
-2. **Repeated CarPlay guidance and stock-navigation handoff**  （Failure）
-   One handoff can currently succeed. Cleanup and gate-release ordering have been adjusted again to support the second and later cycles, but repeated vehicle testing is still pending.
+7. **Adapted Amap guidance data on iOS 26.5.1 and later**
+   The third-party navigation data format and update timing changed on iOS 26.5.1 and later. This project adds an Amap-specific V38 compatibility state machine and native metadata protocol for route generations, physical maneuver-head alignment, distance freshness, transient inactive states, and maneuver rollover. These changes prevent premature arrow clearing, incorrect jumps, and frozen distances while retaining the project's existing display, handoff, and renderer improvements.
 
 ### Download and deployment
 
 Ready-to-use files are stored in [`release/`](release/):
 
 - `release/carplay_hook.jar`
+- `release/libcarplay_hook.so`
 - `release/maneuver_render`
 - `release/SHA256SUMS`
 
-Replace `carplay_hook.jar` and `maneuver_render` together.
+Replace `carplay_hook.jar`, `libcarplay_hook.so`, and `maneuver_render` together. Do not mix files from different releases, and preserve executable permissions on `libcarplay_hook.so` and `maneuver_render` after uploading them.
 
 | File | SHA-256 |
 | --- | --- |
-| `carplay_hook.jar` | `bd7f04479b269e36c6c1e88d6e52e077135f51fa6016c506895991c9efc6338b` |
+| `carplay_hook.jar` | `94d0356d9a12730aca6dd430552c3aaf15ef9021ce3ddee87a760de966f5ad92` |
+| `libcarplay_hook.so` | `87d10f67fbb3dc142642d899977bab0a6eb4009f61d3bcd873d0cce9e01511f7` |
 | `maneuver_render` | `f86c7a44288d55c352837b3432874cf81836431929e625e7cded42d5664e993e` |
 
 Firmware configuration reference files are stored in [`deploy/`](deploy/). The `build/` directory is reserved for generated local artifacts and is not tracked.
@@ -318,9 +319,10 @@ Local test artifacts are written to `build/` and are not committed as release fi
 
 ### Deployment files that differ from upstream
 
-The two modified deployment files are:
+The three modified deployment files are:
 
-- `carplay_hook.jar`
-- `maneuver_render`
+- `carplay_hook.jar`: the fused Java implementation, including the maneuver state machine, first-frame startup, display thresholds, U-turn direction, lifecycle and stock-navigation handoff logic, plus the Amap V38 adaptation;
+- `libcarplay_hook.so`: the main hook fused with V38 metadata, exposing route generations, physical maneuver-head alignment, distance freshness, and related state to Java;
+- `maneuver_render`: the current main renderer with preload, first-frame confirmation, display control, and Context restoration logic.
 
-`libcarplay_hook.so` and `flag_atlas.rgba` remain unchanged from upstream.
+`flag_atlas.rgba` remains unchanged from upstream.
