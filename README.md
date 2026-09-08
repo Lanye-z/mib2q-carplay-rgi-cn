@@ -27,6 +27,8 @@
  visible_in_app 保活            initialDistance 缺失
                                 → bargraph fallback
 
+
+
                                 
 ## 中文说明
 
