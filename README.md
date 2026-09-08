@@ -7,6 +7,27 @@
 
 ---
 
+
+                     CarPlay RGI
+                         │
+            ┌────────────┴────────────┐
+            │                         │
+     普通/第三方地图               高德 Amap
+            │                         │
+     通用 RouteGuidance          Amap 专项状态机
+            │                    V38 / formal lock
+            │                    rollover / progress
+            │                    stabilization 等
+            └────────────┬────────────┘
+                         │
+                 通用 Luka 修复
+                         │
+          ┌──────────────┴──────────────┐
+          │                             │
+ visible_in_app 保活            initialDistance 缺失
+                                → bargraph fallback
+
+                                
 ## 中文说明
 
 ### 项目来源
