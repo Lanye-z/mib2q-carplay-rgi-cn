@@ -1,15 +1,21 @@
 # Release files / 发布文件
 
-本目录包含可直接部署的两个配套文件：
+本目录包含 `main-legacy-third-party-nav` 分支的配套部署文件。
 
-- `carplay_hook.jar`
-- `maneuver_render`
+- `carplay_hook.jar`：legacy + Luka 通用第三方地图兼容版本（不含 main 的 Amap 专项状态机）
+- `libcarplay_hook.so`：与 `main` 分支相同的 native hook
+- `maneuver_render`：与 `main` 分支相同的 renderer
+- `flag_atlas.rgba`：与 `main` 分支相同的旗帜纹理资源
 
-必须同时替换这两个文件。校验值见 `SHA256SUMS`。源码构建方法见仓库根目录 `README.md`。
+当前分支真正的 RGI 逻辑差异主要在 `carplay_hook.jar`；其余三个支撑文件与 `main` 共用同一份内容。`carplay_hook.jar`、`libcarplay_hook.so` 和 `maneuver_render` 的校验值见 `SHA256SUMS`。
 
-This directory contains the two matched deployment files:
+## English
 
-- `carplay_hook.jar`
-- `maneuver_render`
+This directory contains the matched deployment files for the `main-legacy-third-party-nav` branch.
 
-Replace both files together. See `SHA256SUMS` for hashes and the root `README.md` for source-build instructions.
+- `carplay_hook.jar`: legacy build plus Luka's generic third-party navigation compatibility fixes, without main's Amap-specific state machine
+- `libcarplay_hook.so`: byte-identical to `main`
+- `maneuver_render`: byte-identical to `main`
+- `flag_atlas.rgba`: byte-identical to `main`
+
+The branch-specific RGI behavior is primarily in `carplay_hook.jar`; the other three support files are shared with `main`. Checksums for `carplay_hook.jar`, `libcarplay_hook.so`, and `maneuver_render` are listed in `SHA256SUMS`.
