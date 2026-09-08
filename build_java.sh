@@ -21,6 +21,7 @@ SRC_DIR="$BUILD_DIR/java/src-v38-amap"
 OUTPUT_DIR="$BUILD_DIR/java/classes"
 OUTPUT_JAR="${JAVA_OUTPUT:-$BUILD_DIR/carplay_hook.jar}"
 OVERLAY="$SCRIPT_DIR/tools/apply_v38_amap_overlay.py"
+THIRD_PARTY_OVERLAY="$SCRIPT_DIR/tools/apply_third_party_nav_overlay.py"
 
 echo "=== CarPlay Hook Java Builder ==="
 
@@ -46,14 +47,23 @@ for dep in org.osgi.framework-1.10.0.jar org.osgi.util.tracker-1.5.4.jar; do
 done
 command -v python3 >/dev/null 2>&1 || { echo "ERROR: missing python3" >&2; exit 1; }
 [ -f "$OVERLAY" ] || { echo "ERROR: missing $OVERLAY" >&2; exit 1; }
+[ -f "$THIRD_PARTY_OVERLAY" ] || { echo "ERROR: missing $THIRD_PARTY_OVERLAY" >&2; exit 1; }
 
-# Keep java_patch as the readable main-based source of truth.  Apply the exact
-# v38 native-metadata consumption changes only to a disposable build copy.
+# Keep java_patch as the readable main-based source of truth. Apply exact,
+# anchor-checked overlays only to a disposable build copy:
+#   1) v38 native-metadata consumption for the Amap compatibility engine;
+#   2) Luka third-party navigation liveness + missing-step bargraph fixes,
+#      with an explicit guard that preserves the existing Amap-v38 timeout.
 rm -rf "$SRC_DIR" "$OUTPUT_DIR"
 mkdir -p "$SRC_DIR" "$OUTPUT_DIR" "$(dirname "$OUTPUT_JAR")"
 cp -R "$BASE_SRC_DIR"/. "$SRC_DIR"/
 python3 "$OVERLAY" --java \
     "$SRC_DIR/com/luka/carplay/routeguidance/AmapV38Compat.java"
+python3 "$THIRD_PARTY_OVERLAY" \
+    --route-guidance "$SRC_DIR/com/luka/carplay/routeguidance/RouteGuidance.java" \
+    --amap-v38 "$SRC_DIR/com/luka/carplay/routeguidance/AmapV38Compat.java" \
+    --amap-router "$SRC_DIR/com/luka/carplay/routeguidance/AmapRouteGuidance.java" \
+    --bap-bridge "$SRC_DIR/com/luka/carplay/routeguidance/BAPBridge.java"
 
 # Generate BUILD_ID from the build date and current Git commit.
 BUILD_ID="$(date +%Y-%m-%d)-$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo 'nogit')"
@@ -68,7 +78,7 @@ fi
 SOURCES_LIST=$(mktemp)
 find "$SRC_DIR" -name '*.java' -type f ! -path '*/out/*' | sort > "$SOURCES_LIST"
 FILE_COUNT=$(wc -l < "$SOURCES_LIST" | tr -d ' ')
-echo "Compiling $FILE_COUNT files (target 1.2, main + v38 Amap metadata)..."
+echo "Compiling $FILE_COUNT files (target 1.2, main + v38 Amap + third-party nav compat)..."
 
 "$JAVAC" -source 1.2 -target 1.2 \
     -cp "$LSD_JAR:$OSGI_CP" \
