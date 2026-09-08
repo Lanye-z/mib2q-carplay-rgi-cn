@@ -6,6 +6,8 @@
 > This project modifies infotainment firmware files and cluster display behavior. Back up the original files before deployment. Use at your own risk.
 
 ---
+在最开始备份的基础上加上了针对高版本IOS高德地图的补丁
+
 
 ## 中文说明
 
